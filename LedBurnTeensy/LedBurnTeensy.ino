@@ -56,6 +56,8 @@
 // 
 
 #define MAX_PIXELS 600
+#define NUM_OF_STRIPS 8
+#define TOTAL_PIXELS (MAX_PIXELS * NUM_OF_STRIPS)
 #define LB_HEADER_SIZE (8+8+8)
 #define MAX_PACKET_SIZE ( LB_HEADER_SIZE + ( 3 * (MAX_PIXELS)))
 
@@ -64,6 +66,7 @@
 
 DMAMEM int displayMemory[LEDS_PER_STRIP*6];
 int drawingMemory[LEDS_PER_STRIP*6];
+int networkPacketMemory[TOTAL_PIXELS];
 
 const int config = WS2811_GRB | WS2811_800kHz;
 OctoWS2811 leds(LEDS_PER_STRIP, displayMemory, drawingMemory, config);
@@ -71,9 +74,9 @@ OctoWS2811 leds(LEDS_PER_STRIP, displayMemory, drawingMemory, config);
 // Enter a MAC address and IP address for your controller below.
 // The IP address will be dependent on your local network:
 byte mac[] = {
-  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 215 //last byte should be the hex of the last byte of the ip address
+  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, IP_IN_SUBNET //last byte should be the hex of the last byte of the ip address
 };
-IPAddress ip( 10,0,0,215 );
+IPAddress ip( SUBNET,IP_IN_SUBNET );
 unsigned int localPort = 2000;      // local port to listen on
 // An EthernetUDP instance to let us send and receive packets over UDP
 EthernetUDP Udp;
@@ -141,11 +144,25 @@ void InitIndicationLeds()
 
 //////////////////////////////////////////////////////////
 
-void SendColorsToStrips()
+bool hasDataPendingToSend = false;
+void SendDataToLeds() 
 {
+  if(!hasDataPendingToSend) {
+    return;
+  }
+  
   digitalWrite(bluePin, HIGH);
-  digitalWrite(redPin, LOW);
+  digitalWrite(redPin, LOW);  
   leds.show();
+  hasDataPendingToSend = false;
+}
+
+void CopyNetworkBufferToLeds()
+{
+  for(int i=0; i<TOTAL_PIXELS; i++) {
+    leds.setPixel(i, networkPacketMemory[i]);
+  }
+  hasDataPendingToSend = true;
 }
 
 
@@ -199,7 +216,9 @@ void PaintLeds(const uint8_t packetBuf[], const PacketHeaderData &phd)
   
   for(int i=0; i<numOfPixels; i++)
   {
-    leds.setPixel(destLedIndex, *(sourcePointer+0), *(sourcePointer+1), *(sourcePointer+2));
+    int color = leds.color(*(sourcePointer+0), *(sourcePointer+1), *(sourcePointer+2));
+    networkPacketMemory[destLedIndex] = color;
+    //leds.setPixel(destLedIndex, color);
     sourcePointer += 3;
     destLedIndex++;
   }
@@ -234,7 +253,7 @@ bool BeforePaintLeds(const PacketHeaderData &phd)
   // if we are here, then this frame is not what we expected, but it is not frame from udp re-order.
   // so we change our reference point to it!
   ResetCounter(phd.frameId);
-  SendColorsToStrips(); // use the leds we already recived
+  CopyNetworkBufferToLeds(); // use the leds we already recived
   return true;
 }
 
@@ -252,7 +271,7 @@ void AfterPaintLeds(const PacketHeaderData &phd)
   if(numOfReceivedSegments >= phd.segInFrame)
   {
     ResetCounter(phd.frameId + 1);
-    SendColorsToStrips();
+    CopyNetworkBufferToLeds();
   }
 }
 
@@ -276,9 +295,11 @@ void loop() {
   int packetSize = Udp.parsePacket();
 
   digitalWrite(bluePin, LOW);
-  
-  if (packetSize > 0) {  
-    Serial.println(packetSize);
+
+  if(packetSize == 0) {
+    SendDataToLeds();
+  }
+  else {  
 
     if(packetSize > MAX_PACKET_SIZE)
     {
